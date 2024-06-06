@@ -1,0 +1,173 @@
+---
+title: "Predicting the Manner in which an Exercise is Performed"
+author: "KMH"
+date: "2024-06-03"
+output: 
+    html_document:
+        toc: true
+        toc_float: true
+        toc_depth: 2
+urlcolor: blue
+---
+
+<hr>
+
+<h2><b>Executive Summary</b></h2>
+
+A training dataset of 19,622 observations from six study participants wearing accelerometers was used to develop a Random Forest classifier for predicting the manner in which a dumbbell exercise was performed (Class A = Correct Way, Class B = Incorrect Way 1, Class C = Incorrect Way 2, Class D = Incorrect Way 3, Class E = Incorrect Way 4). The resulting classifier is highly accurate with an out-of-sample accuracy of approximately 99% (95% CI: 98.9% - 99.4%). 
+
+<hr>
+
+<h2><b>Synopsis</b></h2> 
+
+The goal of this project is to use data from accelerometers to predict the manner in which an exercise was performed. The data come from six participants who were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different ways: exactly according to specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D), and throwing the hips to the front (Class E). Class A corresponds to the specified execution of the exercise, while the other four classes correspond to common mistakes. More study information can be found [here](https://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har).
+
+The "classe" variable (values A, B, C, D, or E as described above) is the variable we wish to predict. After training our prediction model we use it to predict the manner in which the dumbbell exercise was performed for a test set of 20 observations. 
+
+**Note: The table of contents on the left can be used to quickly access various sections of this report.**
+
+<hr>
+
+<h2><b>Setup</b></h2> 
+
+We begin by setting global code-chunk options and loading libraries necessary for the analysis.
+
+```{r setup, include=T}
+
+knitr::opts_chunk$set(echo = TRUE)                         # set global chunk options
+suppressWarnings(suppressMessages(library(tidyverse)))     # tidyverse
+suppressWarnings(suppressMessages(library(caret)))         # caret
+
+```
+
+<hr>
+
+<h2><b>Data Processing</b></h2> 
+
+To load the data, we first check if a "data" sub-directory exists in the user's current working directory. If it does not, said sub-directory will be created to store the downloaded data. The data is then downloaded and read into R.
+
+```{r loadData, cache=TRUE}
+
+# If "data" sub-dir doesn't exist, create it
+if(!file.exists("./data")){dir.create("./data")} 
+
+# Download file to "data" sub-dir
+download.file('https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv',
+              destfile = './data/pmlTraining.csv')
+
+download.file('https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv',
+              destfile = './data/pmlTesting.csv')
+
+# Read data into R
+training <- read.csv('./data/pmlTraining.csv') # training set
+test     <- read.csv('./data/pmlTesting.csv')  # test set
+
+```
+
+To process the data, we first note there are summary observations in the training set (identified by new_window="yes") that contain summary measurements (min, max, etc.) for each time window over which data was collected. These summary observations represent a fundamentally different unit for prediction so they are accordingly removed from the training set.
+
+After removing the summary observations from the training set, we identity the summary variables in the training set where every observation now has a missing value. Such variables are identified and removed as they cannot be used for prediction. In addition, we check for the existence of any "Near Zero Variability" (NZV) variables and remove them. 
+
+Lastly, the first seven variables contain identifiers and time-stamps that will not be used for prediction so they are also removed from the training set. We conclude by aligning the training and test sets so they contain the same set of predictors.
+
+```{r prepData, cache=TRUE, dependson="loadData"}
+
+startN   <- nrow(training)                        # number of observations to start with
+training <- training %>% filter(new_window=="no") # delete summary obs
+diff     <- startN - nrow(training)               # number of summary observations deleted
+training[training==""]<-NA                        # set blank values to NA
+
+# Find variables where every observation is NA
+naVars <- apply(training,2, function(x) sum(is.na(x))/nrow(training)) 
+naVars <- naVars[naVars==1] # vars where every obs is NA will have 1 (i.e., 100%) for value
+
+training <- training %>% select(-c(names(naVars))) # Remove vars where every observation is NA
+training <- training %>% select(-c(X:num_window))  # Remove 1st 7 vars (not needed for prediction)
+
+# check for near-zero variables (there are none)
+nearZero <- nearZeroVar(training)
+
+# Predictor names
+prednames <- names(training); prednames <- prednames[prednames != "classe"]
+
+# Align variables in training and test sets
+test <- test %>% select(all_of(prednames))
+
+```
+
+A total of `r diff` summary observations were removed from the training set. After processing there are `r ncol(training)-1` predictors in the training set, all of which have non-missing values. No NZV variables were detected.
+
+<hr>
+
+<h2><b>Training the Prediction Model</b></h2>
+
+We are primarily concerned with developing a highly accurate prediction model and less concerned about developing an interpretable prediction model. Our outcome is categorical with five classes so one promising avenue for highly accurate predictions is the Random Forest (RF). Before training the RF, we first split our training set into separate training (70%) and validation (30%) sets so that we can estimate the out-of-sample accuracy of our prediction model before applying our predictions to the test set. 
+
+10-fold cross-validation is used to train the RF to get a better estimate of the out-of-sample accuracy of our prediction model than would be obtained if we simply trained the RF on the new training set without cross-validation. All predictors will be available during training to maximize the information available for prediction.
+
+```{r trainRF, cache=TRUE, dependson="prepData"}
+
+# Cleaned training set that will be split into new training and validation
+cleantrain <- training 
+
+# Create new training and validation sets from cleaned training set
+set.seed(666)                                                           # for reproducibility
+intrain  <- createDataPartition(cleantrain$classe, p=0.7, list = FALSE) # 70/30 split
+training <- cleantrain[intrain,]                                        # new training set
+validate <- cleantrain[-intrain,]                                       # validation set
+
+# Train RF
+myctrl <- trainControl(method="cv",number=10)                                      # 10-fold CV
+myrf   <- train(classe ~ ., data=training, method="rf",trControl=myctrl,prox=TRUE) # train RF
+
+```
+
+<hr>
+
+<h2><b>Estimating Accuracy and Error</b></h2> 
+
+We proceed by estimating the out-of-sample accuracy and error of our RF prediction model in two ways:
+
+1. Using 10-fold cross-validation in the training set
+2. Applying our RF prediction model to the validation set
+
+```{r estimates}
+
+# Get final model from training RF
+finmod <- myrf$finalModel
+
+# Look at out-of-sample accuracy/error obtained with 10-fold cross validation 
+confusionMatrix(as.factor(training$classe),finmod$predicted)
+
+# Apply RF predictions to validation set
+validPred <- predict(myrf,newdata=validate)
+
+# Look at out-of-sample accuracy/error using validation set
+confusionMatrix(as.factor(validate$classe),validPred)
+
+# 2 estimates of out-of-sample accuracy/error
+cvAcc    <- confusionMatrix(as.factor(training$classe),finmod$predicted)$overall[1] # 10-fold CV 
+validAcc <- confusionMatrix(as.factor(validate$classe),validPred)$overall[1]        # validation set   
+
+```
+
+From 10-fold cross-validation we obtain out-of-sample accuracy and error rate estimates of `r round(cvAcc*100,2)`% and `r round((1-cvAcc)*100,2)`%, respectively. When applying the RF prediction model to the validation set we obtain out-of-sample accuracy and error rate estimates of `r round(validAcc*100,2)`% and `r round((1-validAcc)*100,2)`%, respectively.
+
+Since no observations in the validation set were involved in training the RF prediction model we would expect the out-of-sample accuracy obtained via this method to be smaller than that obtained via 10-fold cross-validation, and indeed that is the case. Nevertheless, both estimates (10-fold cross-validation and validation set) are extremely close and indicate an extremely accurate prediction model.
+
+<hr>
+
+<h2><b>Prediction on the Test Set</b></h2> 
+
+We conclude by predicting on the test set. The 20 predicted values are given below.
+
+```{r testpred}
+
+# Apply RF predictions to test set
+testPred <- predict(myrf,newdata=test)
+
+print(testPred) # Look at predictions
+
+```
+
+<hr>
